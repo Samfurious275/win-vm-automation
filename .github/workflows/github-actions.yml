@@ -6,7 +6,7 @@ on:
       - main
 
 jobs:
-  install_python_and_node:
+  install_python_nodejs:
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
@@ -69,14 +69,24 @@ jobs:
             (New-Object System.Net.WebClient).DownloadFile("https://www.python.org/ftp/python/3.11.4/python-3.11.4-amd64.exe", $pythonInstaller)
             Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
 
+            # Reload PATH
+            $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User")
+
+            # Verify Python installation
+            python --version
+            if ($LASTEXITCODE -ne 0) {
+                Write-Host "Python not found. Using full path..."
+                & "C:\Users\Public\Python311\python.exe" --version
+            }
+
             # Install Node.js
             $nodeInstaller = "$env:TEMP\node-installer.msi"
             (New-Object System.Net.WebClient).DownloadFile("https://nodejs.org/dist/v18.16.1/node-v18.16.1-x64.msi", $nodeInstaller)
             Start-Process -FilePath "msiexec.exe" -ArgumentList "/i $nodeInstaller /quiet" -Wait
 
-            # Verify installations
-            python --version
+            # Verify Node.js installation
             node --version
+            npm --version
           }
 
           # Step 6: Cleanup
