@@ -1,6 +1,5 @@
 name: Install Packages on Windows VM
 
-
 on:
   push:
     branches:
