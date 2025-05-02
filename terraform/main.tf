@@ -105,3 +105,17 @@ resource "azurerm_virtual_machine_extension" "win_vm_init" {
     commandToExecute = "powershell.exe -Command \"Set-ExecutionPolicy Bypass -Scope CurrentUser -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1')); Enable-PSRemoting -Force; Set-Item -Path 'WSMan:\\localhost\\Service\\Auth\\Basic' -Value $true; Set-Item -Path 'WSMan:\\localhost\\Service\\AllowUnencrypted' -Value $true\""
   })
 }
+
+resource "azurerm_virtual_machine_extension" "win_vm_post_reboot" {
+  name                 = "post-reboot-winrm"
+  virtual_machine_id   = azurerm_virtual_machine.example.id
+  publisher            = "Microsoft.Compute"
+  type                 = "CustomScriptExtension"
+  type_handler_version = "1.10"
+  settings = jsonencode({
+    fileUris = [
+      "https://raw.githubusercontent.com/your-repo/win-vm-automation/main/scripts/post-reboot-winrm.ps1"
+    ]
+    commandToExecute = "powershell.exe -ExecutionPolicy Bypass -File post-reboot-winrm.ps1"
+  })
+}
