@@ -1,4 +1,4 @@
-name: Install .NET + Python + Nginx on Windows VM
+name: Install Python and Node.js on Windows VM
 
 on:
   push:
@@ -6,44 +6,8 @@ on:
       - main
 
 jobs:
-  # Job 1: Install .NET Framework and Reboot
-  install_dotnet:
-    name: "Install .NET Framework and Reboot"
+  install_python_and_node:
     runs-on: windows-latest
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v3
-
-      - name: Install .NET Framework 4.8 and Reboot
-        env:
-          VM_IP: ${{ secrets.VM_IP }}
-          VM_USER: ${{ secrets.VM_USER }}
-          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-        run: |
-          # Download .NET Framework 4.8
-          $url = "https://download.visualstudio.microsoft.com/download/pr/2d6bb6b2-226a-4baa-bdec-798822606ff1/8494001c276a4b96804cde7829c04d7f/ndp48-x86-x64-allos-enu.exe"
-          $output = "$env:TEMP\ndp48-x86-x64-allos-enu.exe"
-          (New-Object System.Net.WebClient).DownloadFile($url, $output)
-
-          # Install .NET Framework silently
-          $process = Start-Process -FilePath $output -ArgumentList "/q /norestart" -Wait -PassThru
-          if ($process.ExitCode -notin @(0, 3010)) {
-              Write-Error ".NET Framework installation failed with exit code: $($process.ExitCode)"
-              exit 1
-          }
-
-          # Reboot the VM
-          Write-Host "Rebooting VM..."
-          Restart-Computer -Force
-
-          # Wait for VM to come back online
-          Start-Sleep -Seconds 180  # Adjust based on VM boot time
-
-  # Job 2: Post-Reboot Configuration
-  install_packages:
-    name: "Install Python and Nginx after Reboot"
-    runs-on: windows-latest
-    needs: install_dotnet  # Ensure this runs after .NET install
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
@@ -54,20 +18,18 @@ jobs:
           VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
-          # Configure WinRM client
+          # Step 1: Configure WinRM client
           net start winrm
           winrm quickconfig -quiet
           Set-Item WSMan:\localhost\Client\AllowUnencrypted $true -Force
           Set-Item WSMan:\localhost\Client\Auth\Basic $true -Force
+          Set-Item WSMan:\localhost\Client\TrustedHosts "$env:VM_IP" -Force
 
-          # Add VM IP to TrustedHosts
-          Set-Item WSMan:\localhost\Client\TrustedHosts $env:VM_IP -Force
-
-          # Create credential
+          # Step 2: Create credential
           $password = ConvertTo-SecureString "$env:VM_PASSWORD" -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential ("$env:VM_USER", $password)
+          $credential = New-Object System.Management.Automation.PSCredential("$env:VM_USER", $password)
 
-          # Wait for WinRM to become available
+          # Step 3: Wait for VM responsiveness
           function Test-WinRMConnection {
             param($ip)
             try {
@@ -83,7 +45,7 @@ jobs:
           $attempt = 0
           while ($attempt -lt $maxAttempts) {
             if (Test-WinRMConnection -ip "$env:VM_IP") {
-              Write-Host "WinRM is now available."
+              Write-Host "WinRM is available."
               break
             }
             Write-Host "Waiting for WinRM... Attempt $attempt/$maxAttempts"
@@ -96,9 +58,28 @@ jobs:
             exit 1
           }
 
-          # Run post-reboot script
+          # Step 4: Create remote session
           $session = New-PSSession -ComputerName "$env:VM_IP" -Port 5985 -Credential $credential -Authentication Basic
-          Invoke-Command -Session $session -FilePath ".\scripts\post-reboot-install-packages.ps1"
+
+          # Step 5: Install Python and Node.js
+          Write-Host "Installing Python and Node.js..."
+          Invoke-Command -Session $session -ScriptBlock {
+            # Install Python
+            $pythonInstaller = "$env:TEMP\python-installer.exe"
+            (New-Object System.Net.WebClient).DownloadFile("https://www.python.org/ftp/python/3.11.4/python-3.11.4-amd64.exe", $pythonInstaller)
+            Start-Process -FilePath $pythonInstaller -ArgumentList "/quiet InstallAllUsers=1 PrependPath=1" -Wait
+
+            # Install Node.js
+            $nodeInstaller = "$env:TEMP\node-installer.msi"
+            (New-Object System.Net.WebClient).DownloadFile("https://nodejs.org/dist/v18.16.1/node-v18.16.1-x64.msi", $nodeInstaller)
+            Start-Process -FilePath "msiexec.exe" -ArgumentList "/i $nodeInstaller /quiet" -Wait
+
+            # Verify installations
+            python --version
+            node --version
+          }
+
+          # Step 6: Cleanup
           Remove-PSSession -Session $session
 
       - name: Reset WinRM Configuration (Cleanup)
