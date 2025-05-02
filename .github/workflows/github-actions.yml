@@ -9,7 +9,6 @@ jobs:
   install_packages:
     runs-on: windows-latest
     env:
-      # Environment variables for better readability
       WINRM_PORT: 5985
       MAX_RETRIES: 30
       RETRY_DELAY: 10  # seconds
@@ -18,7 +17,7 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Display Environment Info (For Debugging)
+      - name: Display Environment Info
         run: |
           Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
           Write-Host "Working Directory: $PWD"
@@ -27,7 +26,6 @@ jobs:
 
       - name: Configure WinRM Client
         env:
-          VM_HOSTNAME: ${{ secrets.VM_HOSTNAME }}
           VM_IP: ${{ secrets.VM_IP }}
           VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
@@ -43,13 +41,11 @@ jobs:
           Set-Item WSMan:\localhost\Client\AllowUnencrypted $true -Force
           Set-Item WSMan:\localhost\Client\Auth\Basic $true -Force
           
-          # Add both hostname and IP to trusted hosts
-          $trustedHosts = "$env:VM_HOSTNAME,$env:VM_IP"
-          Set-Item WSMan:\localhost\Client\TrustedHosts $trustedHosts -Force
+          # Add VM IP to trusted hosts
+          Set-Item WSMan:\localhost\Client\TrustedHosts "${{ secrets.VM_IP }}" -Force
 
       - name: Test VM Connectivity with Retry
         env:
-          VM_HOSTNAME: ${{ secrets.VM_HOSTNAME }}
           VM_IP: ${{ secrets.VM_IP }}
           VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
@@ -84,54 +80,55 @@ jobs:
           # Attempt connection with retry
           $attempt = 0
           $connected = $false
-          $targets = @("$env:VM_HOSTNAME", "$env:VM_IP")
 
           while (-not $connected -and $attempt -lt $env:MAX_RETRIES) {
-            foreach ($target in $targets) {
-              Write-Host "Attempt $($attempt+1) of $($env:MAX_RETRIES): Trying $target"
-              if (Test-Connection -ComputerName $target -Credential $credential) {
-                Write-Host "Successfully connected to $target"
-                $script:connectedTarget = $target
-                $connected = $true
-                break
-              }
-              Start-Sleep -Seconds $env:RETRY_DELAY
-              $attempt++
+            Write-Host "Attempt $($attempt+1) of $($env:MAX_RETRIES): Trying $env:VM_IP"
+            
+            if (Test-Connection -ComputerName "$env:VM_IP" -Credential $credential) {
+              Write-Host "Successfully connected to $env:VM_IP"
+              $connected = $true
+              break
             }
+            
+            Start-Sleep -Seconds $env:RETRY_DELAY
+            $attempt++
           }
 
           if (-not $connected) {
             Write-Error "Failed to connect to VM after $($env:MAX_RETRIES) attempts"
             exit 1
           }
-          Write-Host "Connected to $connectedTarget"
 
       - name: Deploy Packages to VM
         env:
-          VM_HOSTNAME: ${{ secrets.VM_HOSTNAME }}
           VM_IP: ${{ secrets.VM_IP }}
           VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
-          # Reuse connection logic
+          # Reuse credential from previous step
           $password = ConvertTo-SecureString "$env:VM_PASSWORD" -AsPlainText -Force
           $credential = New-Object System.Management.Automation.PSCredential(
             "$env:VM_USER", $password
           )
 
-          # Create session to connected target
-          $session = New-PSSession `
-            -ComputerName $connectedTarget `
-            -Port $env:WINRM_PORT `
-            -Credential $credential `
-            -Authentication Basic
+          # Create session to target
+          try {
+            $session = New-PSSession `
+              -ComputerName "$env:VM_IP" `
+              -Port $env:WINRM_PORT `
+              -Credential $credential `
+              -Authentication Basic
 
-          # Execute deployment script
-          Write-Host "Deploying packages to $connectedTarget..."
-          Invoke-Command -Session $session -FilePath ".\scripts\install-packages.ps1"
-          
-          # Clean up
-          Remove-PSSession -Session $session
+            Write-Host "Deploying packages to $env:VM_IP..."
+            Invoke-Command -Session $session -FilePath ".\scripts\install-packages.ps1"
+          } catch {
+            Write-Error "Deployment failed: $_"
+            exit 1
+          } finally {
+            if ($session) {
+              Remove-PSSession -Session $session
+            }
+          }
 
       - name: Reset WinRM Configuration (Cleanup)
         if: always()
