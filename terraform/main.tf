@@ -31,8 +31,10 @@ resource "azurerm_network_interface" "example" {
     name                          = "internal"
     subnet_id                     = azurerm_subnet.example.id
     private_ip_address_allocation = "Dynamic"
+    public_ip_address_id          = azurerm_public_ip.example.id # Assign public IP here
   }
 }
+
 
 resource "azurerm_public_ip" "example" {
   name                = "win-vm-pip"
@@ -59,12 +61,6 @@ resource "azurerm_network_security_group" "example" {
     destination_address_prefix = "*"
   }
 }
-
-resource "azurerm_network_interface_security_group_association" "example" {
-  network_interface_id      = azurerm_network_interface.example.id
-  network_security_group_id = azurerm_network_security_group.example.id
-}
-
 resource "azurerm_virtual_machine" "example" {
   name                  = "win-vm"
   location              = azurerm_resource_group.example.location
