@@ -1,4 +1,4 @@
-name: Install Packages on Windows VM
+name: Install .NET + Python + Nginx on Windows VM
 
 on:
   push:
@@ -6,134 +6,104 @@ on:
       - main
 
 jobs:
-  install_packages:
+  # Job 1: Install .NET Framework and Reboot
+  install_dotnet:
+    name: "Install .NET Framework and Reboot"
     runs-on: windows-latest
-    env:
-      WINRM_PORT: 5985
-      MAX_RETRIES: 30
-      RETRY_DELAY: 10  # seconds
-
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v3
 
-      - name: Display Environment Info
-        run: |
-          Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
-          Write-Host "Working Directory: $PWD"
-          Write-Host "Environment Variables:"
-          Get-ChildItem Env:
-
-      - name: Configure WinRM Client
+      - name: Install .NET Framework 4.8 and Reboot
         env:
           VM_IP: ${{ secrets.VM_IP }}
           VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
-          # Set error preference
-          $ErrorActionPreference = "Stop"
-          
-          # Configure WinRM
+          # Download .NET Framework 4.8
+          $url = "https://download.visualstudio.microsoft.com/download/pr/2d6bb6b2-226a-4baa-bdec-798822606ff1/8494001c276a4b96804cde7829c04d7f/ndp48-x86-x64-allos-enu.exe"
+          $output = "$env:TEMP\ndp48-x86-x64-allos-enu.exe"
+          (New-Object System.Net.WebClient).DownloadFile($url, $output)
+
+          # Install .NET Framework silently
+          $process = Start-Process -FilePath $output -ArgumentList "/q /norestart" -Wait -PassThru
+          if ($process.ExitCode -notin @(0, 3010)) {
+              Write-Error ".NET Framework installation failed with exit code: $($process.ExitCode)"
+              exit 1
+          }
+
+          # Reboot the VM
+          Write-Host "Rebooting VM..."
+          Restart-Computer -Force
+
+          # Wait for VM to come back online
+          Start-Sleep -Seconds 180  # Adjust based on VM boot time
+
+  # Job 2: Post-Reboot Configuration
+  install_packages:
+    name: "Install Python and Nginx after Reboot"
+    runs-on: windows-latest
+    needs: install_dotnet  # Ensure this runs after .NET install
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Configure WinRM and Install Packages
+        env:
+          VM_IP: ${{ secrets.VM_IP }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          # Configure WinRM client
           net start winrm
           winrm quickconfig -quiet
-          
-          # Set WinRM client configuration
           Set-Item WSMan:\localhost\Client\AllowUnencrypted $true -Force
           Set-Item WSMan:\localhost\Client\Auth\Basic $true -Force
-          
-          # Add VM IP to trusted hosts
-          Set-Item WSMan:\localhost\Client\TrustedHosts "${{ secrets.VM_IP }}" -Force
 
-      - name: Test VM Connectivity with Retry
-        env:
-          VM_IP: ${{ secrets.VM_IP }}
-          VM_USER: ${{ secrets.VM_USER }}
-          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-        run: |
-          # Create credential object
+          # Add VM IP to TrustedHosts
+          Set-Item WSMan:\localhost\Client\TrustedHosts $env:VM_IP -Force
+
+          # Create credential
           $password = ConvertTo-SecureString "$env:VM_PASSWORD" -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential(
-            "$env:VM_USER", $password
-          )
+          $credential = New-Object System.Management.Automation.PSCredential ("$env:VM_USER", $password)
 
-          # Connection test function
-          function Test-Connection {
-            param(
-              [string]$ComputerName,
-              [PSCredential]$Credential
-            )
+          # Wait for WinRM to become available
+          function Test-WinRMConnection {
+            param($ip)
             try {
-              $session = New-PSSession `
-                -ComputerName $ComputerName `
-                -Port $env:WINRM_PORT `
-                -Credential $Credential `
-                -Authentication Basic `
-                -ErrorAction Stop
+              $session = New-PSSession -ComputerName $ip -Port 5985 -Credential $credential -Authentication Basic -ErrorAction Stop
               Remove-PSSession -Session $session
               return $true
             } catch {
-              Write-Warning "Connection failed: $_"
               return $false
             }
           }
 
-          # Attempt connection with retry
+          $maxAttempts = 60
           $attempt = 0
-          $connected = $false
-
-          while (-not $connected -and $attempt -lt $env:MAX_RETRIES) {
-            Write-Host "Attempt $($attempt+1) of $($env:MAX_RETRIES): Trying $env:VM_IP"
-            
-            if (Test-Connection -ComputerName "$env:VM_IP" -Credential $credential) {
-              Write-Host "Successfully connected to $env:VM_IP"
-              $connected = $true
+          while ($attempt -lt $maxAttempts) {
+            if (Test-WinRMConnection -ip "$env:VM_IP") {
+              Write-Host "WinRM is now available."
               break
             }
-            
-            Start-Sleep -Seconds $env:RETRY_DELAY
+            Write-Host "Waiting for WinRM... Attempt $attempt/$maxAttempts"
+            Start-Sleep -Seconds 10
             $attempt++
           }
 
-          if (-not $connected) {
-            Write-Error "Failed to connect to VM after $($env:MAX_RETRIES) attempts"
+          if ($attempt -ge $maxAttempts) {
+            Write-Error "WinRM did not become available within timeout."
             exit 1
           }
 
-      - name: Deploy Packages to VM
-        env:
-          VM_IP: ${{ secrets.VM_IP }}
-          VM_USER: ${{ secrets.VM_USER }}
-          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
-        run: |
-          # Reuse credential from previous step
-          $password = ConvertTo-SecureString "$env:VM_PASSWORD" -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential(
-            "$env:VM_USER", $password
-          )
-
-          # Create session to target
-          try {
-            $session = New-PSSession `
-              -ComputerName "$env:VM_IP" `
-              -Port $env:WINRM_PORT `
-              -Credential $credential `
-              -Authentication Basic
-
-            Write-Host "Deploying packages to $env:VM_IP..."
-            Invoke-Command -Session $session -FilePath ".\scripts\install-packages.ps1"
-          } catch {
-            Write-Error "Deployment failed: $_"
-            exit 1
-          } finally {
-            if ($session) {
-              Remove-PSSession -Session $session
-            }
-          }
+          # Run post-reboot script
+          $session = New-PSSession -ComputerName "$env:VM_IP" -Port 5985 -Credential $credential -Authentication Basic
+          Invoke-Command -Session $session -FilePath ".\scripts\post-reboot-install-packages.ps1"
+          Remove-PSSession -Session $session
 
       - name: Reset WinRM Configuration (Cleanup)
         if: always()
         run: |
-          # Reset WinRM client settings
           Set-Item WSMan:\localhost\Client\AllowUnencrypted $false -Force
           Set-Item WSMan:\localhost\Client\Auth\Basic $false -Force
           Set-Item WSMan:\localhost\Client\TrustedHosts "" -Force
