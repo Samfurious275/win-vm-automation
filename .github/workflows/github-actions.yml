@@ -1,6 +1,5 @@
 name: Install Packages on Windows VM
 
-
 on:
   push:
     branches:
@@ -9,61 +8,136 @@ on:
 jobs:
   install_packages:
     runs-on: windows-latest
-    steps:
-      - name: Checkout Code
-        uses: actions/checkout@v2
+    env:
+      # Environment variables for better readability
+      WINRM_PORT: 5985
+      MAX_RETRIES: 30
+      RETRY_DELAY: 10  # seconds
 
-      - name: Setup WinRM and Install Packages
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: Display Environment Info (For Debugging)
+        run: |
+          Write-Host "PowerShell Version: $($PSVersionTable.PSVersion)"
+          Write-Host "Working Directory: $PWD"
+          Write-Host "Environment Variables:"
+          Get-ChildItem Env:
+
+      - name: Configure WinRM Client
         env:
+          VM_HOSTNAME: ${{ secrets.VM_HOSTNAME }}
           VM_IP: ${{ secrets.VM_IP }}
           VM_USER: ${{ secrets.VM_USER }}
           VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
         run: |
-          # Start WinRM
+          # Set error preference
+          $ErrorActionPreference = "Stop"
+          
+          # Configure WinRM
           net start winrm
           winrm quickconfig -quiet
+          
+          # Set WinRM client configuration
+          Set-Item WSMan:\localhost\Client\AllowUnencrypted $true -Force
+          Set-Item WSMan:\localhost\Client\Auth\Basic $true -Force
+          
+          # Add both hostname and IP to trusted hosts
+          $trustedHosts = "$env:VM_HOSTNAME,$env:VM_IP"
+          Set-Item WSMan:\localhost\Client\TrustedHosts $trustedHosts -Force
 
-          # Allow unencrypted traffic
-          Set-Item -Path WSMan:\localhost\Client\AllowUnencrypted -Value $true -Force
-          Set-Item -Path WSMan:\localhost\Client\Auth\Basic -Value $true -Force
-
-          # Add VM to TrustedHosts
-          $trustedHostsPath = "WSMan:\localhost\Client\TrustedHosts"
-          if (-not (Get-Item -Path $trustedHostsPath -ErrorAction SilentlyContinue)) {
-              New-Item -Path $trustedHostsPath -Value "$env:VM_IP"
-          } else {
-              Set-Item -Path $trustedHostsPath -Value "$env:VM_IP" -Concatenate -Force
-          }
-
-          # Create credential
+      - name: Test VM Connectivity with Retry
+        env:
+          VM_HOSTNAME: ${{ secrets.VM_HOSTNAME }}
+          VM_IP: ${{ secrets.VM_IP }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          # Create credential object
           $password = ConvertTo-SecureString "$env:VM_PASSWORD" -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential ("$env:VM_USER", $password)
+          $credential = New-Object System.Management.Automation.PSCredential(
+            "$env:VM_USER", $password
+          )
 
-          # Wait for WinRM
-          function Test-WinRMConnection {
-            param($ip)
+          # Connection test function
+          function Test-Connection {
+            param(
+              [string]$ComputerName,
+              [PSCredential]$Credential
+            )
             try {
-              $session = New-PSSession -ComputerName $ip -Port 5985 -Credential $credential -Authentication Basic -ErrorAction Stop
+              $session = New-PSSession `
+                -ComputerName $ComputerName `
+                -Port $env:WINRM_PORT `
+                -Credential $Credential `
+                -Authentication Basic `
+                -ErrorAction Stop
               Remove-PSSession -Session $session
               return $true
             } catch {
+              Write-Warning "Connection failed: $_"
               return $false
             }
           }
 
-          $maxAttempts = 30
+          # Attempt connection with retry
           $attempt = 0
-          while ($attempt -lt $maxAttempts) {
-            if (Test-WinRMConnection -ip "$env:VM_IP") {
-              Write-Host "WinRM is now available."
-              break
+          $connected = $false
+          $targets = @("$env:VM_HOSTNAME", "$env:VM_IP")
+
+          while (-not $connected -and $attempt -lt $env:MAX_RETRIES) {
+            foreach ($target in $targets) {
+              Write-Host "Attempt $($attempt+1) of $($env:MAX_RETRIES): Trying $target"
+              if (Test-Connection -ComputerName $target -Credential $credential) {
+                Write-Host "Successfully connected to $target"
+                $script:connectedTarget = $target
+                $connected = $true
+                break
+              }
+              Start-Sleep -Seconds $env:RETRY_DELAY
+              $attempt++
             }
-            Write-Host "Waiting for WinRM... Attempt $attempt/$maxAttempts"
-            Start-Sleep -Seconds 10
-            $attempt++
           }
 
-          # Run install script
-          $session = New-PSSession -ComputerName "$env:VM_IP" -Port 5985 -Credential $credential -Authentication Basic
+          if (-not $connected) {
+            Write-Error "Failed to connect to VM after $($env:MAX_RETRIES) attempts"
+            exit 1
+          }
+          Write-Host "Connected to $connectedTarget"
+
+      - name: Deploy Packages to VM
+        env:
+          VM_HOSTNAME: ${{ secrets.VM_HOSTNAME }}
+          VM_IP: ${{ secrets.VM_IP }}
+          VM_USER: ${{ secrets.VM_USER }}
+          VM_PASSWORD: ${{ secrets.VM_PASSWORD }}
+        run: |
+          # Reuse connection logic
+          $password = ConvertTo-SecureString "$env:VM_PASSWORD" -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential(
+            "$env:VM_USER", $password
+          )
+
+          # Create session to connected target
+          $session = New-PSSession `
+            -ComputerName $connectedTarget `
+            -Port $env:WINRM_PORT `
+            -Credential $credential `
+            -Authentication Basic
+
+          # Execute deployment script
+          Write-Host "Deploying packages to $connectedTarget..."
           Invoke-Command -Session $session -FilePath ".\scripts\install-packages.ps1"
+          
+          # Clean up
           Remove-PSSession -Session $session
+
+      - name: Reset WinRM Configuration (Cleanup)
+        if: always()
+        run: |
+          # Reset WinRM client settings
+          Set-Item WSMan:\localhost\Client\AllowUnencrypted $false -Force
+          Set-Item WSMan:\localhost\Client\Auth\Basic $false -Force
+          Set-Item WSMan:\localhost\Client\TrustedHosts "" -Force
+          Write-Host "WinRM client configuration reset"
