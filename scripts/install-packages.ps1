@@ -1,17 +1,8 @@
-
 # Ensure Chocolatey is installed
 if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
     Write-Host "Installing Chocolatey..."
     Set-ExecutionPolicy Bypass -Scope CurrentUser -Force
     iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
-}
-
-# Verify Chocolatey installation
-try {
-    choco --version | Out-Null
-} catch {
-    Write-Error "Chocolatey failed to install"
-    exit 1
 }
 
 # Install required packages
@@ -36,7 +27,8 @@ try {
         )
         Write-Host "Nginx path added to system PATH"
     } else {
-        Write-Warning "Nginx installation directory not found"
+        Write-Error "Nginx installation directory not found"
+        exit 1
     }
 } catch {
     Write-Error "Failed to update PATH: $_"
@@ -56,13 +48,6 @@ try {
 
     # Test Python
     python --version
-    
-    # Test Visual Studio Build Tools
-    if (Get-Command cl.exe -ErrorAction SilentlyContinue) {
-        cl.exe /?
-    } else {
-        Write-Warning "cl.exe (C++ compiler) not found in PATH"
-    }
 } catch {
     Write-Error "Verification failed: $_"
     exit 1
