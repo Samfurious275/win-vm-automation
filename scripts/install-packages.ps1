@@ -1,3 +1,4 @@
+
 # Ensure Chocolatey is installed
 if (-not (Get-Command choco -ErrorAction SilentlyContinue)) {
     Write-Host "Installing Chocolatey..."
