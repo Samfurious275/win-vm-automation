@@ -16,7 +16,7 @@ try {
 
 # Install required packages
 Write-Host "Installing packages..."
-choco install nginx python visualstudio2022buildtools -y --force
+choco install nginx python -y --force
 
 # Add Nginx to system PATH
 try {
